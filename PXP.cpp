@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "PXP.h"
+#include <EventResponder.h>
 
 #if defined(__IMXRT1176__)
 
@@ -13,6 +14,8 @@
 #pragma GCC diagnostic error "-Wswitch"
 
 PXPClass PXP;
+
+static PXPClass *pxp_instance = nullptr;
 
 /* Format translation.  Each switch covers every enumerator and has NO
  * default:, so adding a PXPFormat without teaching all three tables is a
@@ -50,10 +53,58 @@ uint16_t pxpBitsPerPixel(PXPFormat f)
     return 0;
 }
 
-bool     PXPClass::begin()                 { return false; }
-void     PXPClass::end()                   {}
-bool     PXPClass::busy() const            { return false; }
-PXPError PXPClass::wait(uint32_t)          { return PXP_ERR_UNIMPLEMENTED; }
+bool PXPClass::begin()
+{
+    if (_begun) return true;
+
+    /* 1. Ungate the peripheral clock (LPCG127, BUS_CLK_ROOT). */
+    CCM_LPCG127_DIRECT = 1;
+
+    /* 2. RM 52.5: set SFTRST, then clear SFTRST and CLKGATE.
+     *    CTRL comes out of reset as 0xC000_0000 with both bits set, so this
+     *    sequence is mandatory - without it every operation is a no-op. */
+    PXP_CTRL_SET = PXP_CTRL_SFTRST;
+    for (volatile int i = 0; i < 100; i++) { }        /* reset settle */
+    PXP_CTRL_CLR = PXP_CTRL_SFTRST | PXP_CTRL_CLKGATE;
+
+    /* 3. Confirm the block actually came alive. */
+    if (PXP_CTRL & (PXP_CTRL_SFTRST | PXP_CTRL_CLKGATE)) {
+        _lastError = PXP_ERR_TIMEOUT;
+        return false;
+    }
+
+    PXP_STAT_CLR = PXP_STAT_IRQ;
+    pxp_instance = this;
+    _begun = true;
+    _lastError = PXP_OK;
+    return true;
+}
+
+void PXPClass::end()
+{
+    if (!_begun) return;
+    PXP_CTRL_SET = PXP_CTRL_CLKGATE;
+    CCM_LPCG127_DIRECT = 0;
+    _begun = false;
+}
+
+bool PXPClass::busy() const
+{
+    return _begun && (PXP_CTRL & PXP_CTRL_ENABLE);
+}
+
+PXPError PXPClass::wait(uint32_t timeout_ms)
+{
+    uint32_t start = millis();
+    while (!(PXP_STAT & PXP_STAT_IRQ)) {
+        if ((millis() - start) > timeout_ms) return PXP_ERR_TIMEOUT;
+    }
+    uint32_t stat = PXP_STAT;
+    PXP_STAT_CLR = PXP_STAT_IRQ;
+    if (stat & PXP_STAT_AXI_READ_ERROR)  return PXP_ERR_AXI_READ;
+    if (stat & PXP_STAT_AXI_WRITE_ERROR) return PXP_ERR_AXI_WRITE;
+    return PXP_OK;
+}
 PXPError PXPClass::fill(const PXPSurface &, uint32_t)           { return PXP_ERR_UNIMPLEMENTED; }
 PXPError PXPClass::blit(const PXPSurface &, const PXPSurface &) { return PXP_ERR_UNIMPLEMENTED; }
 bool     PXPSurface::reachable() const     { return false; }
