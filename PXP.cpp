@@ -100,16 +100,135 @@ PXPError PXPClass::wait(uint32_t timeout_ms)
         if ((millis() - start) > timeout_ms) return PXP_ERR_TIMEOUT;
     }
     uint32_t stat = PXP_STAT;
-    PXP_STAT_CLR = PXP_STAT_IRQ;
+    PXP_STAT_CLR = PXP_STAT_IRQ | PXP_STAT_AXI_READ_ERROR | PXP_STAT_AXI_WRITE_ERROR;
     if (stat & PXP_STAT_AXI_READ_ERROR)  return PXP_ERR_AXI_READ;
     if (stat & PXP_STAT_AXI_WRITE_ERROR) return PXP_ERR_AXI_WRITE;
     return PXP_OK;
 }
 PXPError PXPClass::fill(const PXPSurface &, uint32_t)           { return PXP_ERR_UNIMPLEMENTED; }
-PXPError PXPClass::blit(const PXPSurface &, const PXPSurface &) { return PXP_ERR_UNIMPLEMENTED; }
-bool     PXPSurface::reachable() const     { return false; }
-PXPError PXPOp::_program()                 { return PXP_ERR_UNIMPLEMENTED; }
-PXPError PXPOp::run(uint32_t)              { return PXP_ERR_UNIMPLEMENTED; }
+/* Which memory can an AXI bus master reach?  TCM is the open question and is
+ * settled empirically in Task 10; until then only the ranges we are certain
+ * about are accepted. */
+bool PXPSurface::reachable() const
+{
+    /* Validate the WHOLE surface extent, not just the base - a surface based
+     * in-range but running past a region's end is not reachable. */
+    uint32_t a   = (uint32_t)data;
+    uint32_t end = a + (uint32_t)sizeBytes();
+    if (end < a) return false;                                  /* wrap */
+    if (a >= 0x20240000u && end <= 0x202C0000u) return true;    /* OCRAM  512K */
+    if (a >= 0x80000000u && end <= 0x84000000u) return true;    /* SDRAM   64M */
+    if (a >= 0x30000000u && end <= 0x31000000u) return true;    /* FLASH   16M */
+    return false;
+}
+
+PXPError PXPOp::_program()
+{
+    if (!_dst || !_dst->data)               return PXP_ERR_CONFIG;
+    if (!_fillOnly && (!_src || !_src->data)) return PXP_ERR_CONFIG;
+    if (!_dst->reachable())                 return PXP_ERR_UNREACHABLE;
+    if (!_fillOnly && !_src->reachable())   return PXP_ERR_UNREACHABLE;
+
+    /* Window size: 90/270 swap the axes. */
+    uint16_t win_w = _fillOnly ? _dst->width  : _src->width;
+    uint16_t win_h = _fillOnly ? _dst->height : _src->height;
+    if (!_fillOnly && (_rot == PXP_ROT_90 || _rot == PXP_ROT_270)) {
+        uint16_t t = win_w; win_w = win_h; win_h = t;
+    }
+
+    /* Reject a degenerate window: win-1 would underflow uint16 to 0xFFFF and
+     * PXP_COORD would program a 16383-row rectangle.  QEMU clamps to 1024 and
+     * tolerates it; silicon does not - it runs off the end of the buffer. */
+    if (win_w == 0 || win_h == 0) return PXP_ERR_CONFIG;
+
+    if ((uint32_t)_x + win_w > _dst->width ||
+        (uint32_t)_y + win_h > _dst->height) return PXP_ERR_CONFIG;
+
+    /* Phase 1 does plain same-format copies (spec 3); a cross-format blit
+     * without CSC copies raw bytes the destination then misreads.  Enforce it
+     * explicitly - Phase 5 (CSC/YUV) is where this relaxes. */
+    if (!_fillOnly && _src->format != _dst->format) return PXP_ERR_FORMAT;
+
+    /* Translate to the per-role hardware encodings; a format legal in one
+     * role may not exist in the other. */
+    uint8_t out_fmt = pxpOutFormat(_dst->format);
+    uint8_t ps_fmt  = _fillOnly ? 0u : pxpPsFormat(_src->format);
+    if (out_fmt == PXP_FMT_NA || ps_fmt == PXP_FMT_NA) return PXP_ERR_FORMAT;
+
+    uint8_t  dbpp = _dst->bytesPerPixel();
+    if (dbpp == 0 || _dst->pitch == 0) return PXP_ERR_CONFIG;
+    if (!_fillOnly && (_src->bytesPerPixel() == 0 || _src->pitch == 0))
+        return PXP_ERR_CONFIG;
+
+    uint32_t out_buf = (uint32_t)_dst->data + (uint32_t)_y * _dst->pitch
+                                           + (uint32_t)_x * dbpp;
+
+    /* RM 52.3.4.1(4) forbids rotate combined with flip/scale/decimation on an
+     * "unaligned" buffer but never defines unaligned.  The only concrete number
+     * the RM gives for OUT_BUF (52.6.4) is "any byte alignment is valid; 64B
+     * alignment is recommended for optimal performance", so 64B is the
+     * conservative reading.  Task 10 probes what silicon ACTUALLY requires and
+     * this constant is corrected from that finding - it is not a guess we keep. */
+    if ((_rot != PXP_ROT_0 || _hflip || _vflip) && (out_buf & 0x3Fu))
+        return PXP_ERR_ALIGN;
+
+    /* Output window is retargeted, NOT offset via OUT_PS_ULC: PXP writes the
+     * whole OUT_LRC rectangle, so offsetting there would repaint everything
+     * around the sprite with PS_BACKGROUND. */
+    PXP_OUT_CTRL   = (uint32_t)out_fmt & PXP_OUT_FORMAT_MASK;
+    PXP_OUT_BUF    = out_buf;
+    PXP_OUT_PITCH  = _dst->pitch;
+    PXP_OUT_LRC    = PXP_COORD(win_w - 1, win_h - 1);
+
+    PXP_PS_BACKGROUND = _bg;
+
+    if (_fillOnly) {
+        /* Degenerate PS rectangle => every output pixel is PS_BACKGROUND. */
+        PXP_OUT_PS_ULC = PXP_COORD(1, 1);
+        PXP_OUT_PS_LRC = PXP_COORD(0, 0);
+    } else {
+        PXP_PS_CTRL  = (uint32_t)ps_fmt & PXP_PS_FORMAT_MASK;
+        PXP_PS_BUF   = (uint32_t)_src->data;
+        PXP_PS_PITCH = _src->pitch;
+        PXP_OUT_PS_ULC = PXP_COORD(0, 0);
+        PXP_OUT_PS_LRC = PXP_COORD(win_w - 1, win_h - 1);
+    }
+
+    /* AS is unused in Phase 1: park it outside the window. */
+    PXP_OUT_AS_ULC = PXP_COORD(1, 1);
+    PXP_OUT_AS_LRC = PXP_COORD(0, 0);
+
+    uint32_t ctrl = PXP_CTRL;
+    ctrl &= ~(PXP_CTRL_ROTATE_MASK | PXP_CTRL_HFLIP | PXP_CTRL_VFLIP |
+              PXP_CTRL_IRQ_ENABLE);
+    ctrl |= ((uint32_t)_rot << PXP_CTRL_ROTATE_SHIFT);
+    if (_hflip) ctrl |= PXP_CTRL_HFLIP;
+    if (_vflip) ctrl |= PXP_CTRL_VFLIP;
+    PXP_CTRL = ctrl;
+
+    return PXP_OK;
+}
+
+PXPError PXPOp::run(uint32_t timeout_ms)
+{
+    if (!PXP._begun)  return PXP_ERR_NOT_BEGUN;
+    if (PXP.busy())   return PXP_ERR_BUSY;
+
+    PXPError e = _program();
+    if (e != PXP_OK) { PXP._lastError = e; return e; }
+
+    PXP_STAT_CLR = PXP_STAT_IRQ;
+    PXP_CTRL_SET = PXP_CTRL_ENABLE;
+
+    e = PXP.wait(timeout_ms);
+    PXP._lastError = e;
+    return e;
+}
+
+PXPError PXPClass::blit(const PXPSurface &src, const PXPSurface &dst)
+{
+    return op().source(src).output(dst).run();
+}
 PXPError PXPOp::runAsync(EventResponder *) { return PXP_ERR_UNIMPLEMENTED; }
 
 #endif /* __IMXRT1176__ */
