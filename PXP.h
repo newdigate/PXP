@@ -32,7 +32,10 @@ enum PXPFormat : uint8_t {
     PXP_RGB565,         /* 16 bpp                                  */
 };
 
-#define PXP_FMT_NA 0xFFu   /* format not representable in that role */
+/* Sentinel for "no encoding in this role".  Note it fails OPEN under masking
+ * (0xFF & 0x3F == 0x3F, a reserved PS value), so callers must compare against
+ * it BEFORE masking - which _program() does. */
+static constexpr uint8_t PXP_FMT_NA = 0xFFu;
 
 uint8_t  pxpPsFormat(PXPFormat f);    /* -> PS_CTRL[FORMAT]  */
 uint8_t  pxpOutFormat(PXPFormat f);   /* -> OUT_CTRL[FORMAT] */
@@ -69,9 +72,11 @@ struct PXPSurface {
     {
         /* Computed in 32 bits: a silent uint16_t truncation would turn an
          * illegal surface into a plausible-looking wrong one. */
-        uint32_t p = pitchBytes ? (uint32_t)pitchBytes
-                                : ((uint32_t)w * pxpBitsPerPixel(f) + 7u) / 8u;
-        pitch = (p > 0u && p <= 0xFFFFu) ? (uint16_t)p : 0u;   /* 0 => rejected */
+        uint32_t minRow = ((uint32_t)w * pxpBitsPerPixel(f) + 7u) / 8u;
+        uint32_t p = pitchBytes ? (uint32_t)pitchBytes : minRow;
+        /* pitch 0 marks an unusable surface, which _program() rejects.  An
+         * explicit pitch narrower than one row is a typo, not a stride. */
+        pitch = (minRow > 0u && p >= minRow && p <= 0xFFFFu) ? (uint16_t)p : 0u;
     }
 
     uint16_t bitsPerPixel() const { return pxpBitsPerPixel(format); }

@@ -6,11 +6,19 @@
 
 #if defined(__IMXRT1176__)
 
+/* Promote -Wswitch to a hard error for this file.  The toolchain does not use
+ * -Werror and the cores build already emits unrelated warnings, so a bare
+ * warning here would scroll past unnoticed - which would defeat the whole
+ * point of the no-default: switches below. */
+#pragma GCC diagnostic error "-Wswitch"
+
 PXPClass PXP;
 
 /* Format translation.  Each switch covers every enumerator and has NO
  * default:, so adding a PXPFormat without teaching all three tables is a
- * -Wswitch compile error instead of a silently wrong register value.
+ * compile error (see the pragma above) instead of a silently wrong register
+ * value.  AS_CTRL[FORMAT] (RM 52.6.22) is a third namespace, unused until
+ * Phase 3, that will need its own translator and its own coverage here then.
  * Verified against RM rev.5 52.6.3 (OUT_CTRL) and 52.6.12 (PS_CTRL). */
 uint8_t pxpPsFormat(PXPFormat f)
 {
