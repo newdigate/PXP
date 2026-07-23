@@ -1,0 +1,61 @@
+#######################################
+# Syntax Coloring Map PXP
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+PXP	KEYWORD1
+PXPClass	KEYWORD1
+PXPSurface	KEYWORD1
+PXPOp	KEYWORD1
+PXPFormat	KEYWORD1
+PXPRotation	KEYWORD1
+PXPError	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+begin	KEYWORD2
+end	KEYWORD2
+op	KEYWORD2
+fill	KEYWORD2
+blit	KEYWORD2
+busy	KEYWORD2
+wait	KEYWORD2
+lastError	KEYWORD2
+source	KEYWORD2
+output	KEYWORD2
+outputAt	KEYWORD2
+background	KEYWORD2
+rotate	KEYWORD2
+flip	KEYWORD2
+run	KEYWORD2
+runAsync	KEYWORD2
+reachable	KEYWORD2
+bitsPerPixel	KEYWORD2
+bytesPerPixel	KEYWORD2
+sizeBytes	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+PXP_RGB565	LITERAL1
+PXP_ARGB8888	LITERAL1
+PXP_XRGB8888	LITERAL1
+PXP_ROT_0	LITERAL1
+PXP_ROT_90	LITERAL1
+PXP_ROT_180	LITERAL1
+PXP_ROT_270	LITERAL1
+PXP_OK	LITERAL1
+PXP_ERR_BUSY	LITERAL1
+PXP_ERR_TIMEOUT	LITERAL1
+PXP_ERR_CONFIG	LITERAL1
+PXP_ERR_UNREACHABLE	LITERAL1
+PXP_ERR_ALIGN	LITERAL1
+PXP_ERR_AXI_READ	LITERAL1
+PXP_ERR_AXI_WRITE	LITERAL1
+PXP_ERR_NOT_BEGUN	LITERAL1
+PXP_ERR_FORMAT	LITERAL1
+PXP_ERR_UNIMPLEMENTED	LITERAL1
