@@ -122,7 +122,10 @@ PXPError PXPClass::fill(const PXPSurface &dst, uint32_t rgb888)
  * the PXP reads CM7 DTCM cleanly (no AXI error), so DTCM is a reachable source
  * - the "bus masters can't see TCM" assumption is false on this FlexRAM SoC.
  * ITCM (0x0, code space) is NOT probed and stays rejected: it is an atypical
- * surface region and unverified.  Caller owns not blitting over its own stack. */
+ * surface region and unverified.  Caller owns not blitting over its own stack.
+ * NOTE: role-agnostic (like the FLASH entry).  Only DTCM-as-SOURCE is HW-probed;
+ * DTCM-as-destination is permitted but unverified - a bad PXP write there
+ * surfaces as PXP_ERR_AXI_WRITE via wait(), not silent corruption. */
 bool PXPSurface::reachable() const
 {
     /* Validate the WHOLE surface extent, not just the base - a surface based
@@ -144,7 +147,6 @@ PXPError PXPOp::_program()
     if (!_dst->reachable())                 return PXP_ERR_UNREACHABLE;
     if (!_fillOnly && !_src->reachable())   return PXP_ERR_UNREACHABLE;
 
-    /* Window size: 90/270 swap the axes. */
     /* PS/source frame dims (fill: the destination window).  These go straight
      * to OUT_LRC / OUT_PS_LRC: with output-stage rotation (ROT_POS=0) the
      * hardware rotates THIS source frame and lays the result out via OUT_PITCH.
