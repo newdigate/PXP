@@ -83,6 +83,9 @@ bool PXPClass::begin()
 void PXPClass::end()
 {
     if (!_begun) return;
+    /* Disable IRQ 57 in the NVIC before gating the block: a torn-down PXP must
+     * not be able to take a completion interrupt. */
+    NVIC_DISABLE_IRQ(IRQ_PXP);
     PXP_CTRL_SET = PXP_CTRL_CLKGATE;
     CCM_LPCG127_DIRECT = 0;
     _begun = false;
@@ -238,6 +241,56 @@ PXPError PXPClass::blit(const PXPSurface &src, const PXPSurface &dst)
 {
     return op().source(src).output(dst).run();
 }
-PXPError PXPOp::runAsync(EventResponder *) { return PXP_ERR_UNIMPLEMENTED; }
+void PXPClass::_isr()
+{
+    uint32_t stat = PXP_STAT;
+    /* Clear IRQ AND the sticky AXI error bits (the `stat` snapshot above still
+     * drives the latch below).  If only IRQ were cleared, a latched AXI error
+     * would survive to the NEXT completion and be misreported on a good op -
+     * the same fails-latent trap fixed in wait(). */
+    PXP_STAT_CLR = PXP_STAT_IRQ | PXP_STAT_AXI_READ_ERROR | PXP_STAT_AXI_WRITE_ERROR;
+
+    PXPClass *self = pxp_instance;
+    if (!self) return;
+
+    if (stat & PXP_STAT_AXI_READ_ERROR)       self->_lastError = PXP_ERR_AXI_READ;
+    else if (stat & PXP_STAT_AXI_WRITE_ERROR) self->_lastError = PXP_ERR_AXI_WRITE;
+    else                                      self->_lastError = PXP_OK;
+
+    EventResponder *er = self->_responder;
+    self->_responder = nullptr;
+    if (er) er->triggerEvent((int)self->_lastError, self);
+}
+
+/* NOT static: PXP.h declares this at namespace scope and befriends that exact
+ * declaration, so a static definition here would be a different function with
+ * internal linkage and would not be the friend. */
+void pxp_isr_trampoline(void) { PXPClass::_isr(); }
+
+PXPError PXPOp::runAsync(EventResponder *onComplete)
+{
+    if (!PXP._begun) return PXP_ERR_NOT_BEGUN;
+    if (PXP.busy())  return PXP_ERR_BUSY;
+
+    PXPError e = _program();
+    if (e != PXP_OK) { PXP._lastError = e; return e; }
+
+    /* onComplete is fired from _isr() -> triggerEvent(), i.e. in the PXP IRQ 57
+     * context.  An attachImmediate() callback (as the gate uses) therefore runs
+     * at interrupt priority - fine for setting a flag, but a heavy callback
+     * (Serial, malloc) would run in the ISR; a caller needing deferral to thread
+     * context should use EventResponder::attach() instead. */
+    PXP._responder = onComplete;
+
+    attachInterruptVector(IRQ_PXP, pxp_isr_trampoline);
+    NVIC_ENABLE_IRQ(IRQ_PXP);
+
+    /* Clear a stale completion AND any latched AXI error before arming, so the
+     * first ISR sees only this op's status. */
+    PXP_STAT_CLR = PXP_STAT_IRQ | PXP_STAT_AXI_READ_ERROR | PXP_STAT_AXI_WRITE_ERROR;
+    PXP_CTRL_SET = PXP_CTRL_IRQ_ENABLE;
+    PXP_CTRL_SET = PXP_CTRL_ENABLE;
+    return PXP_OK;
+}
 
 #endif /* __IMXRT1176__ */
