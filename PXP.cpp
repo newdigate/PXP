@@ -118,9 +118,11 @@ PXPError PXPClass::fill(const PXPSurface &dst, uint32_t rgb888)
     return o.run();
 }
 
-/* Which memory can an AXI bus master reach?  TCM is the open question and is
- * settled empirically in Task 10; until then only the ranges we are certain
- * about are accepted. */
+/* Which memory can the PXP (an AXI bus master) reach?  HW-verified on the EVKB:
+ * the PXP reads CM7 DTCM cleanly (no AXI error), so DTCM is a reachable source
+ * - the "bus masters can't see TCM" assumption is false on this FlexRAM SoC.
+ * ITCM (0x0, code space) is NOT probed and stays rejected: it is an atypical
+ * surface region and unverified.  Caller owns not blitting over its own stack. */
 bool PXPSurface::reachable() const
 {
     /* Validate the WHOLE surface extent, not just the base - a surface based
@@ -128,6 +130,7 @@ bool PXPSurface::reachable() const
     uint32_t a   = (uint32_t)data;
     uint32_t end = a + (uint32_t)sizeBytes();
     if (end < a) return false;                                  /* wrap */
+    if (a >= 0x20000000u && end <= 0x20040000u) return true;    /* DTCM  256K (HW) */
     if (a >= 0x20240000u && end <= 0x202C0000u) return true;    /* OCRAM  512K */
     if (a >= 0x80000000u && end <= 0x84000000u) return true;    /* SDRAM   64M */
     if (a >= 0x30000000u && end <= 0x31000000u) return true;    /* FLASH   16M */
@@ -183,13 +186,14 @@ PXPError PXPOp::_program()
     uint32_t out_buf = (uint32_t)_dst->data + (uint32_t)_y * _dst->pitch
                                            + (uint32_t)_x * dbpp;
 
-    /* RM 52.3.4.1(4) forbids rotate combined with flip/scale/decimation on an
-     * "unaligned" buffer but never defines unaligned.  The only concrete number
-     * the RM gives for OUT_BUF (52.6.4) is "any byte alignment is valid; 64B
-     * alignment is recommended for optimal performance", so 64B is the
-     * conservative reading.  Task 10 probes what silicon ACTUALLY requires and
-     * this constant is corrected from that finding - it is not a guess we keep. */
-    if ((_rot != PXP_ROT_0 || _hflip || _vflip) && (out_buf & 0x3Fu))
+    /* Alignment: RM 52.6.4 says any byte alignment is valid for OUT_BUF (64B
+     * recommended only for performance), and the PXP_ALIGN probe HW-confirmed a
+     * 2-byte-offset rotate-alone is correct.  The one documented hazard is
+     * RM 52.3.4.1(4): rotate COMBINED with flip (or scale/decimation) on an
+     * unaligned buffer.  So guard only that combination, conservatively at 64B
+     * (the combined threshold is not separately probed); rotate-alone and
+     * flip-alone run at any alignment. */
+    if (_rot != PXP_ROT_0 && (_hflip || _vflip) && (out_buf & 0x3Fu))
         return PXP_ERR_ALIGN;
 
     /* Output window is retargeted, NOT offset via OUT_PS_ULC: PXP writes the
