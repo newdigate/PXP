@@ -105,7 +105,16 @@ PXPError PXPClass::wait(uint32_t timeout_ms)
     if (stat & PXP_STAT_AXI_WRITE_ERROR) return PXP_ERR_AXI_WRITE;
     return PXP_OK;
 }
-PXPError PXPClass::fill(const PXPSurface &, uint32_t)           { return PXP_ERR_UNIMPLEMENTED; }
+
+PXPError PXPClass::fill(const PXPSurface &dst, uint32_t rgb888)
+{
+    PXPOp o;
+    o._dst = &dst;
+    o._bg = rgb888 & 0x00FFFFFFu;   /* PS_BACKGROUND is 24-bit; [31:24] reserved */
+    o._fillOnly = true;
+    return o.run();
+}
+
 /* Which memory can an AXI bus master reach?  TCM is the open question and is
  * settled empirically in Task 10; until then only the ranges we are certain
  * about are accepted. */

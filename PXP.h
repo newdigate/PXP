@@ -130,7 +130,10 @@ public:
     void     end();
     PXPOp    op() { return PXPOp(); }
 
-    PXPError fill(const PXPSurface &dst, uint32_t argb);
+    /* Solid fill: every pixel of dst becomes rgb888, a 24-bit 0x00RRGGBB
+     * colour (bits [31:24] reserved) converted to dst's format by hardware -
+     * NOT an alpha format, despite the uint32_t width. */
+    PXPError fill(const PXPSurface &dst, uint32_t rgb888);
     PXPError blit(const PXPSurface &src, const PXPSurface &dst);
 
     bool     busy() const;
