@@ -142,19 +142,27 @@ PXPError PXPOp::_program()
     if (!_fillOnly && !_src->reachable())   return PXP_ERR_UNREACHABLE;
 
     /* Window size: 90/270 swap the axes. */
-    uint16_t win_w = _fillOnly ? _dst->width  : _src->width;
-    uint16_t win_h = _fillOnly ? _dst->height : _src->height;
-    if (!_fillOnly && (_rot == PXP_ROT_90 || _rot == PXP_ROT_270)) {
-        uint16_t t = win_w; win_w = win_h; win_h = t;
-    }
+    /* PS/source frame dims (fill: the destination window).  These go straight
+     * to OUT_LRC / OUT_PS_LRC: with output-stage rotation (ROT_POS=0) the
+     * hardware rotates THIS source frame and lays the result out via OUT_PITCH.
+     * HW-verified - a 90/270 rotation of a non-square surface needs the SOURCE
+     * dims here, NOT the post-rotation dims (they differ only when W != H). */
+    uint16_t ps_w = _fillOnly ? _dst->width  : _src->width;
+    uint16_t ps_h = _fillOnly ? _dst->height : _src->height;
 
-    /* Reject a degenerate window: win-1 would underflow uint16 to 0xFFFF and
+    /* Reject a degenerate window: ps-1 would underflow uint16 to 0xFFFF and
      * PXP_COORD would program a 16383-row rectangle.  QEMU clamps to 1024 and
      * tolerates it; silicon does not - it runs off the end of the buffer. */
-    if (win_w == 0 || win_h == 0) return PXP_ERR_CONFIG;
+    if (ps_w == 0 || ps_h == 0) return PXP_ERR_CONFIG;
 
-    if ((uint32_t)_x + win_w > _dst->width ||
-        (uint32_t)_y + win_h > _dst->height) return PXP_ERR_CONFIG;
+    /* The rotated OUTPUT extent (what actually gets written) - 90/270 swap the
+     * axes.  This, at (x,y), is what must fit inside the destination. */
+    uint16_t out_w = ps_w, out_h = ps_h;
+    if (_rot == PXP_ROT_90 || _rot == PXP_ROT_270) {
+        uint16_t t = out_w; out_w = out_h; out_h = t;
+    }
+    if ((uint32_t)_x + out_w > _dst->width ||
+        (uint32_t)_y + out_h > _dst->height) return PXP_ERR_CONFIG;
 
     /* Phase 1 does plain same-format copies (spec 3); a cross-format blit
      * without CSC copies raw bytes the destination then misreads.  Enforce it
@@ -190,7 +198,7 @@ PXPError PXPOp::_program()
     PXP_OUT_CTRL   = (uint32_t)out_fmt & PXP_OUT_FORMAT_MASK;
     PXP_OUT_BUF    = out_buf;
     PXP_OUT_PITCH  = _dst->pitch;
-    PXP_OUT_LRC    = PXP_COORD(win_w - 1, win_h - 1);
+    PXP_OUT_LRC    = PXP_COORD(ps_w - 1, ps_h - 1);
 
     PXP_PS_BACKGROUND = _bg;
 
@@ -203,16 +211,23 @@ PXPError PXPOp::_program()
         PXP_PS_BUF   = (uint32_t)_src->data;
         PXP_PS_PITCH = _src->pitch;
         PXP_OUT_PS_ULC = PXP_COORD(0, 0);
-        PXP_OUT_PS_LRC = PXP_COORD(win_w - 1, win_h - 1);
+        PXP_OUT_PS_LRC = PXP_COORD(ps_w - 1, ps_h - 1);
     }
 
     /* AS is unused in Phase 1: park it outside the window. */
     PXP_OUT_AS_ULC = PXP_COORD(1, 1);
     PXP_OUT_AS_LRC = PXP_COORD(0, 0);
 
+    /* Bypass CSC1.  It resets NOT-bypassed with YUV->RGB coefficients loaded,
+     * so without this the PS datapath colour-mangles every RGB source (silicon
+     * only - QEMU does not model CSC1).  All Phase-1 formats are RGB; Phase 5
+     * (YUV) makes this conditional and loads real coefficients instead. */
+    PXP_CSC1_COEF0 = PXP_CSC1_BYPASS;
+
+    /* ROT_POS=0: rotate at the output stage (HW-verified for non-square). */
     uint32_t ctrl = PXP_CTRL;
     ctrl &= ~(PXP_CTRL_ROTATE_MASK | PXP_CTRL_HFLIP | PXP_CTRL_VFLIP |
-              PXP_CTRL_IRQ_ENABLE);
+              PXP_CTRL_IRQ_ENABLE | PXP_CTRL_ROT_POS);
     ctrl |= ((uint32_t)_rot << PXP_CTRL_ROTATE_SHIFT);
     if (_hflip) ctrl |= PXP_CTRL_HFLIP;
     if (_vflip) ctrl |= PXP_CTRL_VFLIP;
