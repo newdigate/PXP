@@ -26,9 +26,10 @@ static PXPClass *pxp_instance = nullptr;
 uint8_t pxpPsFormat(PXPFormat f)
 {
     switch (f) {
-    case PXP_ARGB8888: return 0x04;   /* RGB888_ARGB8888 - PS has no 0x00 */
-    case PXP_XRGB8888: return 0x04;   /* same PS encoding as ARGB8888     */
-    case PXP_RGB565:   return 0x0E;
+    case PXP_ARGB8888:   return 0x04;   /* RGB888_ARGB8888 - PS has no 0x00 */
+    case PXP_XRGB8888:   return 0x04;   /* same PS encoding as ARGB8888     */
+    case PXP_RGB565:     return 0x0E;
+    case PXP_UYVY1P422:  return 0x12;   /* RM 52.6.12 UYVY1P422 (1-plane)   */
     }
     return PXP_FMT_NA;
 }
@@ -36,9 +37,10 @@ uint8_t pxpPsFormat(PXPFormat f)
 uint8_t pxpOutFormat(PXPFormat f)
 {
     switch (f) {
-    case PXP_ARGB8888: return 0x00;
-    case PXP_XRGB8888: return 0x04;   /* RGB888, unpacked 24-bit in 32 bits */
-    case PXP_RGB565:   return 0x0E;
+    case PXP_ARGB8888:   return 0x00;
+    case PXP_XRGB8888:   return 0x04;   /* RGB888, unpacked 24-bit in 32 bits */
+    case PXP_RGB565:     return 0x0E;
+    case PXP_UYVY1P422:  return PXP_FMT_NA;  /* YUV is a PS source only, never OUT */
     }
     return PXP_FMT_NA;
 }
@@ -46,9 +48,10 @@ uint8_t pxpOutFormat(PXPFormat f)
 uint16_t pxpBitsPerPixel(PXPFormat f)
 {
     switch (f) {
-    case PXP_ARGB8888: return 32;
-    case PXP_XRGB8888: return 32;
-    case PXP_RGB565:   return 16;
+    case PXP_ARGB8888:   return 32;
+    case PXP_XRGB8888:   return 32;
+    case PXP_RGB565:     return 16;
+    case PXP_UYVY1P422:  return 16;   /* 2 bytes/pixel packed (U Y / V Y)   */
     }
     return 0;
 }
@@ -160,19 +163,38 @@ PXPError PXPOp::_program()
      * tolerates it; silicon does not - it runs off the end of the buffer. */
     if (ps_w == 0 || ps_h == 0) return PXP_ERR_CONFIG;
 
-    /* The rotated OUTPUT extent (what actually gets written) - 90/270 swap the
-     * axes.  This, at (x,y), is what must fit inside the destination. */
-    uint16_t out_w = ps_w, out_h = ps_h;
+    bool srcIsYuv = !_fillOnly && pxpIsYuv(_src->format);
+
+    /* Pre-decimation (RM 52.3.1.3): pixel-drop shrink by 1<<DEC per axis.
+     * Constraints: RM 52.3.4.1 forbids rotate+decimate; the YUV422 chroma
+     * adjustment is not modelled here, so a YUV source must be CSC'd first then
+     * decimated as RGB (two passes).  Require a whole-multiple frame so the last
+     * output pixel maps to a real source pixel. */
+    uint16_t fx = (uint16_t)(1u << (uint8_t)_decx);
+    uint16_t fy = (uint16_t)(1u << (uint8_t)_decy);
+    bool decimating = (_decx != PXP_DEC_1 || _decy != PXP_DEC_1);
+    if (decimating && _rot != PXP_ROT_0) return PXP_ERR_CONFIG;
+    if (decimating && srcIsYuv)          return PXP_ERR_CONFIG;
+    if (ps_w % fx || ps_h % fy)          return PXP_ERR_CONFIG;
+
+    /* Content dims the output stage lays out: the decimated frame (no rotation)
+     * or the rotated source extent (no decimation - they never coexist). */
+    uint16_t cw = ps_w / fx, ch = ps_h / fy;
+    uint16_t out_w = cw, out_h = ch;
     if (_rot == PXP_ROT_90 || _rot == PXP_ROT_270) {
         uint16_t t = out_w; out_w = out_h; out_h = t;
     }
     if ((uint32_t)_x + out_w > _dst->width ||
         (uint32_t)_y + out_h > _dst->height) return PXP_ERR_CONFIG;
 
-    /* Phase 1 does plain same-format copies (spec 3); a cross-format blit
-     * without CSC copies raw bytes the destination then misreads.  Enforce it
-     * explicitly - Phase 5 (CSC/YUV) is where this relaxes. */
-    if (!_fillOnly && _src->format != _dst->format) return PXP_ERR_FORMAT;
+    /* Same-format copies are always legal.  The one cross-format case allowed
+     * is a YUV source into an RGB output: CSC1 does the colour convert in the
+     * PS datapath (armed below).  Any other format mismatch would copy raw
+     * bytes the destination then misreads, so it stays rejected.  (A YUV
+     * OUTPUT is impossible anyway - pxpOutFormat() returns NA for it.) */
+    if (!_fillOnly && _src->format != _dst->format) {
+        if (!(srcIsYuv && !pxpIsYuv(_dst->format))) return PXP_ERR_FORMAT;
+    }
 
     /* Translate to the per-role hardware encodings; a format legal in one
      * role may not exist in the other. */
@@ -201,10 +223,14 @@ PXPError PXPOp::_program()
     /* Output window is retargeted, NOT offset via OUT_PS_ULC: PXP writes the
      * whole OUT_LRC rectangle, so offsetting there would repaint everything
      * around the sprite with PS_BACKGROUND. */
+    /* OUT_LRC is the laid-out content frame: the decimated dims (cw,ch), which
+     * equal the source dims when not decimating.  For rotation the model reads
+     * OUT_LRC as the pre-rotation source frame (decimation excluded), so cw,ch
+     * are still right there. */
     PXP_OUT_CTRL   = (uint32_t)out_fmt & PXP_OUT_FORMAT_MASK;
     PXP_OUT_BUF    = out_buf;
     PXP_OUT_PITCH  = _dst->pitch;
-    PXP_OUT_LRC    = PXP_COORD(ps_w - 1, ps_h - 1);
+    PXP_OUT_LRC    = PXP_COORD(cw - 1, ch - 1);
 
     PXP_PS_BACKGROUND = _bg;
 
@@ -213,22 +239,32 @@ PXPError PXPOp::_program()
         PXP_OUT_PS_ULC = PXP_COORD(1, 1);
         PXP_OUT_PS_LRC = PXP_COORD(0, 0);
     } else {
-        PXP_PS_CTRL  = (uint32_t)ps_fmt & PXP_PS_FORMAT_MASK;
+        /* PS_CTRL[11:10]=DECX, [9:8]=DECY, [5:0]=FORMAT. */
+        PXP_PS_CTRL  = ((uint32_t)ps_fmt & PXP_PS_FORMAT_MASK)
+                     | ((uint32_t)_decx << 10) | ((uint32_t)_decy << 8);
         PXP_PS_BUF   = (uint32_t)_src->data;
         PXP_PS_PITCH = _src->pitch;
         PXP_OUT_PS_ULC = PXP_COORD(0, 0);
-        PXP_OUT_PS_LRC = PXP_COORD(ps_w - 1, ps_h - 1);
+        PXP_OUT_PS_LRC = PXP_COORD(cw - 1, ch - 1);
     }
 
     /* AS is unused in Phase 1: park it outside the window. */
     PXP_OUT_AS_ULC = PXP_COORD(1, 1);
     PXP_OUT_AS_LRC = PXP_COORD(0, 0);
 
-    /* Bypass CSC1.  It resets NOT-bypassed with YUV->RGB coefficients loaded,
-     * so without this the PS datapath colour-mangles every RGB source (silicon
-     * only - QEMU does not model CSC1).  All Phase-1 formats are RGB; Phase 5
-     * (YUV) makes this conditional and loads real coefficients instead. */
-    PXP_CSC1_COEF0 = PXP_CSC1_BYPASS;
+    /* CSC1: for a YUV source, run the PS datapath through the YUV->RGB matrix;
+     * for an RGB source (or fill), bypass it.  The block resets NOT-bypassed
+     * with the YUV->RGB coefficients loaded, so an RGB op MUST set BYPASS or
+     * the copy is colour-mangled (silicon only - QEMU does not model CSC1).
+     * A prior RGB op clobbered COEF0 with the BYPASS bit, so the YUV path
+     * restores all three coefficients, not just clears BYPASS. */
+    if (srcIsYuv) {
+        PXP_CSC1_COEF0 = PXP_CSC1_COEF0_YUV2RGB;   /* BYPASS clear, C0 loaded */
+        PXP_CSC1_COEF1 = PXP_CSC1_COEF1_YUV2RGB;
+        PXP_CSC1_COEF2 = PXP_CSC1_COEF2_YUV2RGB;
+    } else {
+        PXP_CSC1_COEF0 = PXP_CSC1_BYPASS;
+    }
 
     /* ROT_POS=0: rotate at the output stage (HW-verified for non-square). */
     uint32_t ctrl = PXP_CTRL;

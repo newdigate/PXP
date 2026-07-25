@@ -30,7 +30,26 @@ enum PXPFormat : uint8_t {
     PXP_ARGB8888 = 0,   /* 32 bpp, alpha in the high byte          */
     PXP_XRGB8888,       /* 32 bpp, unpacked 24-bit, alpha ignored  */
     PXP_RGB565,         /* 16 bpp                                  */
+    PXP_UYVY1P422,      /* 16 bpp YUV422, one plane, U Y V Y byte order.
+                         * PS-only (a YUV surface is a valid source but never
+                         * an output); the PS datapath's CSC1 converts it to the
+                         * RGB output format.  Matches the OV5640's UYVY mode. */
 };
+
+/* True for the YUV/YCbCr source formats, whose PS datapath must run through
+ * CSC1 (colour convert) rather than bypass it.  Kept as a free function with
+ * NO default: so a new YUV format added to PXPFormat is a compile error here
+ * until classified. */
+inline bool pxpIsYuv(PXPFormat f)
+{
+    switch (f) {
+    case PXP_ARGB8888:
+    case PXP_XRGB8888:
+    case PXP_RGB565:      return false;
+    case PXP_UYVY1P422:   return true;
+    }
+    return false;
+}
 
 /* Sentinel for "no encoding in this role".  Note it fails OPEN under masking
  * (0xFF & 0x3F == 0x3F, a reserved PS value), so callers must compare against
@@ -43,6 +62,17 @@ uint16_t pxpBitsPerPixel(PXPFormat f);
 
 enum PXPRotation : uint8_t {
     PXP_ROT_0 = 0, PXP_ROT_90 = 1, PXP_ROT_180 = 2, PXP_ROT_270 = 3,
+};
+
+/* PS pre-decimation (RM 52.3.1.3): drops source pixels to shrink the processed
+ * surface by an integer factor per axis.  The values ARE the PS_CTRL DECX/DECY
+ * encodings (0..3), and the factor is 1<<value.  Decimation cannot combine with
+ * rotation (RM 52.3.4.1); scaling >2x uses this ahead of the bilinear filter. */
+enum PXPDecim : uint8_t {
+    PXP_DEC_1 = 0,   /* no decimation */
+    PXP_DEC_2 = 1,
+    PXP_DEC_4 = 2,
+    PXP_DEC_8 = 3,
 };
 
 enum PXPError : uint8_t {
@@ -104,6 +134,11 @@ public:
     PXPOp &background(uint32_t argb)    { _bg = argb; return *this; }
     PXPOp &rotate(PXPRotation r)        { _rot = r; return *this; }
     PXPOp &flip(bool h, bool v)         { _hflip = h; _vflip = v; return *this; }
+    /* Shrink the source by 1/2, 1/4 or 1/8 per axis (pixel-drop).  The output
+     * surface must be big enough for source/factor.  Not combinable with
+     * rotate() (returns PXP_ERR_CONFIG), nor with a YUV source in one pass
+     * (do CSC first, then decimate the RGB result). */
+    PXPOp &decimate(PXPDecim x, PXPDecim y) { _decx = x; _decy = y; return *this; }
 
     PXPError run(uint32_t timeout_ms = 100);
     PXPError runAsync(EventResponder *onComplete = nullptr);
@@ -118,6 +153,7 @@ private:
     uint16_t     _x = 0, _y = 0;
     uint32_t     _bg = 0;
     PXPRotation  _rot = PXP_ROT_0;
+    PXPDecim     _decx = PXP_DEC_1, _decy = PXP_DEC_1;
     bool         _hflip = false, _vflip = false;
     bool         _fillOnly = false;   /* PS positioned outside the window */
 };
