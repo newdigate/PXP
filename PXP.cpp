@@ -30,6 +30,7 @@ uint8_t pxpPsFormat(PXPFormat f)
     case PXP_XRGB8888:   return 0x04;   /* same PS encoding as ARGB8888     */
     case PXP_RGB565:     return 0x0E;
     case PXP_UYVY1P422:  return 0x12;   /* RM 52.6.12 UYVY1P422 (1-plane)   */
+    case PXP_YUV1P444:   return 0x10;   /* RM 52.6.12 YUV1P444 (32-bit XYUV)*/
     }
     return PXP_FMT_NA;
 }
@@ -41,6 +42,7 @@ uint8_t pxpOutFormat(PXPFormat f)
     case PXP_XRGB8888:   return 0x04;   /* RGB888, unpacked 24-bit in 32 bits */
     case PXP_RGB565:     return 0x0E;
     case PXP_UYVY1P422:  return PXP_FMT_NA;  /* YUV is a PS source only, never OUT */
+    case PXP_YUV1P444:   return PXP_FMT_NA;  /* YUV is a PS source only, never OUT */
     }
     return PXP_FMT_NA;
 }
@@ -52,6 +54,7 @@ uint16_t pxpBitsPerPixel(PXPFormat f)
     case PXP_XRGB8888:   return 32;
     case PXP_RGB565:     return 16;
     case PXP_UYVY1P422:  return 16;   /* 2 bytes/pixel packed (U Y / V Y)   */
+    case PXP_YUV1P444:   return 32;   /* 4 bytes/pixel unpacked XYUV         */
     }
     return 0;
 }

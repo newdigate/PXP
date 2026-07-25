@@ -34,6 +34,10 @@ enum PXPFormat : uint8_t {
                          * PS-only (a YUV surface is a valid source but never
                          * an output); the PS datapath's CSC1 converts it to the
                          * RGB output format.  Matches the OV5640's UYVY mode. */
+    PXP_YUV1P444,       /* 32 bpp YUV444, one plane, unpacked XYUV in a 32-bit
+                         * word (X:31-24, Y:23-16, U:15-8, V:7-0).  PS-only, runs
+                         * through CSC1 like UYVY.  This is what the CSI stores
+                         * when receiving MIPI YUV422 (24-bit bus -> XYUV8888). */
 };
 
 /* True for the YUV/YCbCr source formats, whose PS datapath must run through
@@ -46,7 +50,8 @@ inline bool pxpIsYuv(PXPFormat f)
     case PXP_ARGB8888:
     case PXP_XRGB8888:
     case PXP_RGB565:      return false;
-    case PXP_UYVY1P422:   return true;
+    case PXP_UYVY1P422:
+    case PXP_YUV1P444:    return true;
     }
     return false;
 }
