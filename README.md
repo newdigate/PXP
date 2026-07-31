@@ -9,20 +9,24 @@ derived from. MIT licensed; see `LICENSE`.
 
 ## Status
 
-**Phase 1 complete, HW-verified on the MIMXRT1170-EVKB.** `fill`, `blit`,
-placement, all four rotations, both flips, and blocking + async completion
-all pass with identical checksums in the QEMU gate and on real silicon
-(`PXP_ALL=PASS`). Hardware verification found and fixed four issues the
-emulator could not see — the memory and colour notes below record what
-actually held on the board, not the original design assumption. See
-`rt1176-evkb/examples/display/pxp_blit_test` for the gate, and
-`rt1176-evkb/docs/superpowers/specs/2026-07-22-rt1176-pxp-design.md`
-(Amendment 2) for the full writeup.
+**Phases 1–3 implemented; Phases 1–2 HW-verified on the MIMXRT1170-EVKB.**
+Phase 1: `fill`, `blit`, placement, all four rotations, both flips, and
+blocking + async completion all pass with identical checksums in the QEMU
+gate and on real silicon (`PXP_ALL=PASS`). Hardware verification found and
+fixed four issues the emulator could not see — the memory and colour notes
+below record what actually held on the board, not the original design
+assumption. See `rt1176-evkb/examples/display/pxp_blit_test` for the gate,
+and `rt1176-evkb/docs/superpowers/specs/2026-07-22-rt1176-pxp-design.md`
+(Amendment 2) for the full writeup. Phase 2 added PS pre-decimation
+(`pxp_decimate_test`) and YUV sources through CSC1 (`pxp_yuv_test`).
+Phase 3 (below) adds alpha-surface compositing; its contested blend/key
+semantics are being pinned by silicon measurement in
+`rt1176-evkb/examples/display/pxp_composite_test`.
 
 Consumed as a manifest library via `import_evkb_library(PXP)` in
 `newdigate/rt1176-evkb`.
 
-## Capabilities (Phase 1)
+## Capabilities (Phases 1–2)
 
 - **`fill`** — every destination pixel becomes a solid RGB888 colour,
   converted to the destination's format by hardware (`PS_BACKGROUND`,
@@ -37,11 +41,65 @@ Consumed as a manifest library via `import_evkb_library(PXP)` in
 - **Flips** — independent horizontal and vertical, composable with rotation.
 - **Completion** — blocking `run()` (polls `STAT` with a timeout) and async
   `runAsync()` (IRQ 57 + `EventResponder`).
-- **Formats** — `PXP_RGB565`, `PXP_ARGB8888`, `PXP_XRGB8888`. These are
-  abstract tokens, not raw register values: the PXP encodes the same format
-  differently depending on whether it's in the source role
-  (`PS_CTRL[FORMAT]`) or the destination role (`OUT_CTRL[FORMAT]`);
-  `pxpPsFormat()`/`pxpOutFormat()` translate per role.
+- **Decimation** — `.decimate(x, y)` pixel-drop shrink by 1/2, 1/4 or 1/8
+  per axis (`PXPDecim`), ahead of any filtering. Not combinable with
+  rotation (RM §52.3.4.1) nor with a YUV source in one pass.
+- **YUV sources** — `PXP_UYVY1P422` and `PXP_YUV1P444` as PS sources, colour
+  converted to the RGB output format by CSC1 (real coefficients, not the
+  bypass). YUV is source-only; it can never be an output format.
+- **Formats** — `PXP_RGB565`, `PXP_ARGB8888`, `PXP_XRGB8888`,
+  `PXP_RGBA8888` (AS/PS roles only — `OUT_CTRL` has no RGBA8888 encoding),
+  plus the two YUV source formats. These are abstract tokens, not raw
+  register values: the PXP encodes the same format differently depending on
+  its role — source (`PS_CTRL[FORMAT]`), destination (`OUT_CTRL[FORMAT]`),
+  or overlay (`AS_CTRL[FORMAT]`); `pxpPsFormat()` / `pxpOutFormat()` /
+  `pxpAsFormat()` translate per role.
+
+## Phase 3: compositing
+
+One-pass hardware composition of an overlay (the PXP's **Alpha Surface**,
+AS) onto the source (PS), programmed with six fluent calls that are all
+inert until `.overlay()` arms them:
+
+```cpp
+PXP.op().source(bg).output(screen)
+        .overlay(sprite)                       // AS surface (ARGB8888 here)
+        .overlayAt(40, 30)                     // position in the output window
+        .overlayAlpha(PXP_ALPHA_EMBEDDED)      // per-pixel alpha blend
+        .run();
+
+// Green-screen: RGB565 overlay, keyed range shows the PS through.
+PXP.op().source(bg).output(screen)
+        .overlay(sprite565)
+        .overlayColorKey(0x00FF00, 0x00FF00)
+        .run();
+```
+
+- **Alpha modes** (`PXPAlphaMode`): `PXP_ALPHA_EMBEDDED` (per-pixel),
+  `PXP_ALPHA_OVERRIDE` (global value), `PXP_ALPHA_MULTIPLY` (global scales
+  per-pixel), `PXP_ALPHA_ROPS` (the raster-op ALU) — each with optional
+  `invert`.
+- **ROPs** (`PXPRop`): the full 12-op table (AND/OR/XOR/NOT combinations of
+  AS and PS). `.rop()` is legal exactly when the mode is `PXP_ALPHA_ROPS`
+  (`PXP_ERR_CONFIG` otherwise, in both directions).
+- **Colorkeys**: `.overlayColorKey()` (AS key) and `.sourceColorKey()`
+  (PS key), 24-bit `low..high` ranges.
+- **AS formats**: `PXP_ARGB8888`, `PXP_RGBA8888`, `PXP_XRGB8888`,
+  `PXP_RGB565` (`pxpAsFormat()`; anything else is `PXP_ERR_FORMAT`).
+- **Validation**: the overlay rect must sit fully inside the output extent,
+  and compositing does not combine with rotation or decimation in this
+  phase (`PXP_ERR_CONFIG`).
+- **Idle-AS discipline**: when `.overlay()` is *not* called, `_program()`
+  still writes the **full** AS register set to its idle state every op — a
+  degenerate `OUT_AS_ULC > OUT_AS_LRC` window, `AS_CTRL = 0`, and both
+  colorkeys at the RM's never-true encoding (`low = 0xFFFFFF`,
+  `high = 0x000000`). A previous composite can never leave the AS
+  half-armed for a later plain blit.
+
+The RM contradicts itself on the blend direction and the AS-key result, so
+the blend/key semantics here are **silicon-measured, not transcribed** —
+measured in `pxp_composite_test`'s transcript
+(`rt1176-evkb/examples/display/pxp_composite_test/transcript_hw_evkb.txt`).
 
 ## Example
 
@@ -131,13 +189,15 @@ YUV sources.
 
 ## Deferred to later phases
 
-Phase 1 is the headless BitBlit engine only. Not yet implemented:
+Not yet implemented:
 
-- Scaling / decimation (`PS_SCALE`, `PS_OFFSET`)
-- Alpha-surface compositing, Porter-Duff blending, colour-key
-- YUV formats and real CSC1 use (beyond the unconditional bypass above)
+- The Porter-Duff blend engine (`ALPHA_B_CTRL`; Phase 3 uses the legacy
+  `AS_CTRL` blend path only)
+- The six remaining `AS_CTRL[FORMAT]` encodings (ARGB1555, ARGB4444,
+  RGBA5551, RGBA4444, RGB555, RGB444)
 - The `NEXT` hardware command queue
 - Cross-format conversion (`blit` currently requires
-  `src.format == dst.format`, enforced as `PXP_ERR_FORMAT`)
+  `src.format == dst.format` except YUV→RGB via CSC1, enforced as
+  `PXP_ERR_FORMAT`)
 - A CM4-owned PXP (IRQ 57 is wired to both the CM7 and CM4 NVICs, so it's
   plausible later, but out of scope here)

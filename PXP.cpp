@@ -20,15 +20,17 @@ static PXPClass *pxp_instance = nullptr;
 /* Format translation.  Each switch covers every enumerator and has NO
  * default:, so adding a PXPFormat without teaching all three tables is a
  * compile error (see the pragma above) instead of a silently wrong register
- * value.  AS_CTRL[FORMAT] (RM 52.6.22) is a third namespace, unused until
- * Phase 3, that will need its own translator and its own coverage here then.
- * Verified against RM rev.5 52.6.3 (OUT_CTRL) and 52.6.12 (PS_CTRL). */
+ * value.  AS_CTRL[FORMAT] (RM 52.6.22) is a third namespace with its own
+ * translator, pxpAsFormat(), below (Phase 3).
+ * Verified against RM rev.5 52.6.3 (OUT_CTRL), 52.6.12 (PS_CTRL) and
+ * 52.6.22 (AS_CTRL). */
 uint8_t pxpPsFormat(PXPFormat f)
 {
     switch (f) {
     case PXP_ARGB8888:   return 0x04;   /* RGB888_ARGB8888 - PS has no 0x00 */
     case PXP_XRGB8888:   return 0x04;   /* same PS encoding as ARGB8888     */
     case PXP_RGB565:     return 0x0E;
+    case PXP_RGBA8888:   return 0x24;   /* RM 52.6.12: alpha at the low byte */
     case PXP_UYVY1P422:  return 0x12;   /* RM 52.6.12 UYVY1P422 (1-plane)   */
     case PXP_YUV1P444:   return 0x10;   /* RM 52.6.12 YUV1P444 (32-bit XYUV)*/
     }
@@ -41,8 +43,25 @@ uint8_t pxpOutFormat(PXPFormat f)
     case PXP_ARGB8888:   return 0x00;
     case PXP_XRGB8888:   return 0x04;   /* RGB888, unpacked 24-bit in 32 bits */
     case PXP_RGB565:     return 0x0E;
+    case PXP_RGBA8888:   return PXP_FMT_NA;  /* no OUT encoding (RM 52.6.3)  */
     case PXP_UYVY1P422:  return PXP_FMT_NA;  /* YUV is a PS source only, never OUT */
     case PXP_YUV1P444:   return PXP_FMT_NA;  /* YUV is a PS source only, never OUT */
+    }
+    return PXP_FMT_NA;
+}
+
+/* AS_CTRL[FORMAT] (RM 52.6.22, [7:4]): the four AS formats Phase 3 supports.
+ * The remaining six encodings of the namespace (ARGB1555, ARGB4444, RGBA5551,
+ * RGBA4444, RGB555, RGB444) have no PXPFormat token yet and are deferred. */
+uint8_t pxpAsFormat(PXPFormat f)
+{
+    switch (f) {
+    case PXP_ARGB8888:   return 0x0;   /* alpha in the high byte             */
+    case PXP_RGBA8888:   return 0x1;   /* alpha in the low byte              */
+    case PXP_XRGB8888:   return 0x4;   /* RGB888 unpacked; alpha := 0xFF     */
+    case PXP_RGB565:     return 0xE;   /* alpha := 0xFF                      */
+    case PXP_UYVY1P422:  return PXP_FMT_NA;  /* AS has no YUV datapath       */
+    case PXP_YUV1P444:   return PXP_FMT_NA;  /* AS has no YUV datapath       */
     }
     return PXP_FMT_NA;
 }
@@ -53,6 +72,7 @@ uint16_t pxpBitsPerPixel(PXPFormat f)
     case PXP_ARGB8888:   return 32;
     case PXP_XRGB8888:   return 32;
     case PXP_RGB565:     return 16;
+    case PXP_RGBA8888:   return 32;
     case PXP_UYVY1P422:  return 16;   /* 2 bytes/pixel packed (U Y / V Y)   */
     case PXP_YUV1P444:   return 32;   /* 4 bytes/pixel unpacked XYUV         */
     }
@@ -251,9 +271,46 @@ PXPError PXPOp::_program()
         PXP_OUT_PS_LRC = PXP_COORD(cw - 1, ch - 1);
     }
 
-    /* AS is unused in Phase 1: park it outside the window. */
-    PXP_OUT_AS_ULC = PXP_COORD(1, 1);
-    PXP_OUT_AS_LRC = PXP_COORD(0, 0);
+    /* === AS (Phase 3) - written EVERY op, armed or idle =================== */
+    if (_as) {
+        uint8_t as_fmt = pxpAsFormat(_as->format);
+        if (as_fmt == PXP_FMT_NA)           return PXP_ERR_FORMAT;
+        if (!_as->data || _as->pitch == 0 || _as->bytesPerPixel() == 0 ||
+            _as->width == 0 || _as->height == 0)
+            return PXP_ERR_CONFIG;
+        if (!_as->reachable())              return PXP_ERR_UNREACHABLE;
+        if (_rot != PXP_ROT_0 || decimating)
+            return PXP_ERR_CONFIG;          /* v8 measures ROT_0 compositing only */
+        if (_rop_set != (_alpha_mode == PXP_ALPHA_ROPS))
+            return PXP_ERR_CONFIG;          /* rop() iff Rops mode */
+        /* AS rect must sit inside the output extent (shared coordinate space
+         * with OUT_PS_ULC/LRC -- outputAt has already retargeted OUT_BUF). */
+        if ((uint32_t)_as_x + _as->width  > out_w ||
+            (uint32_t)_as_y + _as->height > out_h)
+            return PXP_ERR_CONFIG;
+        PXP_AS_BUF    = (uint32_t)_as->data;
+        PXP_AS_PITCH  = _as->pitch;
+        PXP_AS_CTRL   = (((uint32_t)as_fmt & PXP_AS_FORMAT_MASK) << PXP_AS_FORMAT_SHIFT)
+                      | ((uint32_t)_alpha_mode << 1)
+                      | ((uint32_t)_alpha_value << 8)
+                      | (_as_key ? (1u << 3) : 0)
+                      | (_rop_set ? ((uint32_t)_rop << 16) : 0)
+                      | (_alpha_invert ? (1u << 20) : 0);
+        PXP_OUT_AS_ULC = PXP_COORD(_as_x, _as_y);
+        PXP_OUT_AS_LRC = PXP_COORD(_as_x + _as->width - 1,
+                                   _as_y + _as->height - 1);
+        PXP_AS_CLRKEYLOW  = _as_key ? _as_key_low  : 0x00FFFFFFu;
+        PXP_AS_CLRKEYHIGH = _as_key ? _as_key_high : 0x00000000u;
+    } else {
+        if (_rop_set)                       return PXP_ERR_CONFIG;
+        PXP_AS_CTRL       = 0;
+        PXP_OUT_AS_ULC    = 0xFFFFFFFFu;    /* degenerate: ULC > LRC = disarmed */
+        PXP_OUT_AS_LRC    = 0x00000000u;
+        PXP_AS_CLRKEYLOW  = 0x00FFFFFFu;    /* never-true key range (RM 52.3.1.13) */
+        PXP_AS_CLRKEYHIGH = 0x00000000u;
+    }
+    PXP_PS_CLRKEYLOW  = _ps_key ? _ps_key_low  : 0x00FFFFFFu;
+    PXP_PS_CLRKEYHIGH = _ps_key ? _ps_key_high : 0x00000000u;
 
     /* CSC1: for a YUV source, run the PS datapath through the YUV->RGB matrix;
      * for an RGB source (or fill), bypass it.  The block resets NOT-bypassed

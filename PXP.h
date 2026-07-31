@@ -6,6 +6,13 @@
  * Clean-room implementation written from the i.MX RT1170 Reference Manual
  * rev.5, chapter 52.  Not derived from NXP's fsl_pxp.c, nor from any other
  * vendor or GPL-licensed driver source.
+ *
+ * Phases 1-2: fill/blit, placement, rotation, flips, pre-decimation, YUV
+ * sources through CSC1, blocking + async completion.
+ * Phase 3: alpha-surface (AS) compositing - overlay(), the four alpha modes
+ * with invert, the 12-op ROP table, AS + PS colorkeys.  The contested blend
+ * and colorkey semantics are silicon-measured, not RM-transcribed - see the
+ * README's Phase 3 section and pxp_composite_test's transcript.
  */
 #ifndef PXP_h_
 #define PXP_h_
@@ -23,13 +30,16 @@ class EventResponder;
  * on which register it lands in, and not every format is legal in every role.
  *   PS_CTRL[FORMAT]  bits [5:0]  - has no 0x00 encoding
  *   OUT_CTRL[FORMAT] bits [4:0]  - has no 0x24 encoding
- *   AS_CTRL[FORMAT]  bits [7:4]  - only 4 bits wide (Phase 3)
- * Translate with pxpPsFormat()/pxpOutFormat(), which return PXP_FMT_NA when
- * the format cannot be expressed in that role. */
+ *   AS_CTRL[FORMAT]  bits [7:4]  - only 4 bits wide
+ * Translate with pxpPsFormat()/pxpOutFormat()/pxpAsFormat(), which return
+ * PXP_FMT_NA when the format cannot be expressed in that role. */
 enum PXPFormat : uint8_t {
     PXP_ARGB8888 = 0,   /* 32 bpp, alpha in the high byte          */
     PXP_XRGB8888,       /* 32 bpp, unpacked 24-bit, alpha ignored  */
     PXP_RGB565,         /* 16 bpp                                  */
+    PXP_RGBA8888,       /* 32 bpp, alpha in the LOW byte.  AS/PS roles only:
+                         * OUT_CTRL has no RGBA8888 encoding (RM 52.6.3), so
+                         * pxpOutFormat() returns PXP_FMT_NA for it. */
     PXP_UYVY1P422,      /* 16 bpp YUV422, one plane, U Y V Y byte order.
                          * PS-only (a YUV surface is a valid source but never
                          * an output); the PS datapath's CSC1 converts it to the
@@ -49,7 +59,8 @@ inline bool pxpIsYuv(PXPFormat f)
     switch (f) {
     case PXP_ARGB8888:
     case PXP_XRGB8888:
-    case PXP_RGB565:      return false;
+    case PXP_RGB565:
+    case PXP_RGBA8888:    return false;
     case PXP_UYVY1P422:
     case PXP_YUV1P444:    return true;
     }
@@ -63,6 +74,7 @@ static constexpr uint8_t PXP_FMT_NA = 0xFFu;
 
 uint8_t  pxpPsFormat(PXPFormat f);    /* -> PS_CTRL[FORMAT]  */
 uint8_t  pxpOutFormat(PXPFormat f);   /* -> OUT_CTRL[FORMAT] */
+uint8_t  pxpAsFormat(PXPFormat f);    /* -> AS_CTRL[FORMAT]  */
 uint16_t pxpBitsPerPixel(PXPFormat f);
 
 enum PXPRotation : uint8_t {
@@ -78,6 +90,21 @@ enum PXPDecim : uint8_t {
     PXP_DEC_2 = 1,
     PXP_DEC_4 = 2,
     PXP_DEC_8 = 3,
+};
+
+enum PXPAlphaMode : uint8_t {        /* AS_CTRL[ALPHA_CTRL], RM 52.6.22 */
+    PXP_ALPHA_EMBEDDED = 0,          /* per-pixel alpha from the AS format   */
+    PXP_ALPHA_OVERRIDE = 1,          /* AS_CTRL[ALPHA] replaces every pixel  */
+    PXP_ALPHA_MULTIPLY = 2,          /* AS_CTRL[ALPHA] scales per-pixel      */
+    PXP_ALPHA_ROPS     = 3,          /* the ROP table drives the ALU         */
+};
+
+enum PXPRop : uint8_t {              /* AS_CTRL[ROP], RM 52.6.22 */
+    PXP_ROP_MASKAS = 0x0,  PXP_ROP_MASKNOTAS = 0x1, PXP_ROP_MASKASNOT = 0x2,
+    PXP_ROP_MERGEAS = 0x3, PXP_ROP_MERGENOTAS = 0x4, PXP_ROP_MERGEASNOT = 0x5,
+    PXP_ROP_NOTCOPYAS = 0x6, PXP_ROP_NOT = 0x7,
+    PXP_ROP_NOTMASKAS = 0x8, PXP_ROP_NOTMERGEAS = 0x9,
+    PXP_ROP_XORAS = 0xA,  PXP_ROP_NOTXORAS = 0xB,
 };
 
 enum PXPError : uint8_t {
@@ -145,6 +172,22 @@ public:
      * (do CSC first, then decimate the RGB result). */
     PXPOp &decimate(PXPDecim x, PXPDecim y) { _decx = x; _decy = y; return *this; }
 
+    /* Phase 3: composite an overlay (AS) onto the source.  Inert unless
+     * overlay() is called; when it is not, _program() still writes the full
+     * AS register set to its IDLE state (degenerate rect + colorkeys at the
+     * never-true encoding) so a previous op can never leave the AS half-armed.
+     * Semantics measured on silicon (v8 transcript) -- see README Phase 3. */
+    PXPOp &overlay(const PXPSurface &as)   { _as = &as; return *this; }
+    PXPOp &overlay(const PXPSurface &&) = delete;   /* dangling-temporary guard */
+    PXPOp &overlayAt(uint16_t x, uint16_t y) { _as_x = x; _as_y = y; return *this; }
+    PXPOp &overlayAlpha(PXPAlphaMode m, uint8_t value = 0xFF, bool invert = false)
+        { _alpha_mode = m; _alpha_value = value; _alpha_invert = invert; return *this; }
+    PXPOp &overlayColorKey(uint32_t low, uint32_t high)
+        { _as_key_low = low; _as_key_high = high; _as_key = true; return *this; }
+    PXPOp &sourceColorKey(uint32_t low, uint32_t high)
+        { _ps_key_low = low; _ps_key_high = high; _ps_key = true; return *this; }
+    PXPOp &rop(PXPRop r)                   { _rop = r; _rop_set = true; return *this; }
+
     PXPError run(uint32_t timeout_ms = 100);
     PXPError runAsync(EventResponder *onComplete = nullptr);
 
@@ -161,6 +204,17 @@ private:
     PXPDecim     _decx = PXP_DEC_1, _decy = PXP_DEC_1;
     bool         _hflip = false, _vflip = false;
     bool         _fillOnly = false;   /* PS positioned outside the window */
+
+    /* Phase 3 (AS) state - all inert until overlay() arms _as. */
+    const PXPSurface *_as = nullptr;
+    uint16_t     _as_x = 0, _as_y = 0;
+    PXPAlphaMode _alpha_mode = PXP_ALPHA_EMBEDDED;
+    uint8_t      _alpha_value = 0xFF;
+    bool         _alpha_invert = false;
+    bool         _as_key = false, _ps_key = false, _rop_set = false;
+    uint32_t     _as_key_low = 0, _as_key_high = 0;
+    uint32_t     _ps_key_low = 0, _ps_key_high = 0;
+    PXPRop       _rop = PXP_ROP_MASKAS;
 };
 
 void pxp_isr_trampoline(void);
