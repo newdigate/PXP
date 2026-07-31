@@ -58,8 +58,11 @@ Consumed as a manifest library via `import_evkb_library(PXP)` in
 ## Phase 3: compositing
 
 One-pass hardware composition of an overlay (the PXP's **Alpha Surface**,
-AS) onto the source (PS), programmed with six fluent calls that are all
-inert until `.overlay()` arms them:
+AS) onto the source (PS), programmed with six fluent calls. `.overlay()`
+arms the AS; calling any other overlay setter (or `.rop()`) without it is
+treated as a forgotten `.overlay(sprite)` and fails with `PXP_ERR_CONFIG`
+rather than silently degrading to a plain blit
+(`.sourceColorKey()` is PS-side and independent):
 
 ```cpp
 PXP.op().source(bg).output(screen)

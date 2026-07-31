@@ -172,21 +172,28 @@ public:
      * (do CSC first, then decimate the RGB result). */
     PXPOp &decimate(PXPDecim x, PXPDecim y) { _decx = x; _decy = y; return *this; }
 
-    /* Phase 3: composite an overlay (AS) onto the source.  Inert unless
-     * overlay() is called; when it is not, _program() still writes the full
-     * AS register set to its IDLE state (degenerate rect + colorkeys at the
-     * never-true encoding) so a previous op can never leave the AS half-armed.
+    /* Phase 3: composite an overlay (AS) onto the source.  Armed by
+     * overlay(); an overlay* setter (or rop()) WITHOUT overlay() is a
+     * forgotten .overlay(sprite) and fails with PXP_ERR_CONFIG - never a
+     * silent plain blit.  When the AS is unarmed, _program() still writes the
+     * full AS register set to its IDLE state (degenerate rect + colorkeys at
+     * the never-true encoding) so a previous op can never leave the AS
+     * half-armed.  sourceColorKey() is PS-side and independent of overlay().
      * Semantics measured on silicon (v8 transcript) -- see README Phase 3. */
     PXPOp &overlay(const PXPSurface &as)   { _as = &as; return *this; }
     PXPOp &overlay(const PXPSurface &&) = delete;   /* dangling-temporary guard */
-    PXPOp &overlayAt(uint16_t x, uint16_t y) { _as_x = x; _as_y = y; return *this; }
+    PXPOp &overlayAt(uint16_t x, uint16_t y)
+        { _as_x = x; _as_y = y; _overlay_touched = true; return *this; }
     PXPOp &overlayAlpha(PXPAlphaMode m, uint8_t value = 0xFF, bool invert = false)
-        { _alpha_mode = m; _alpha_value = value; _alpha_invert = invert; return *this; }
+        { _alpha_mode = m; _alpha_value = value; _alpha_invert = invert;
+          _overlay_touched = true; return *this; }
     PXPOp &overlayColorKey(uint32_t low, uint32_t high)
-        { _as_key_low = low; _as_key_high = high; _as_key = true; return *this; }
+        { _as_key_low = low; _as_key_high = high; _as_key = true;
+          _overlay_touched = true; return *this; }
     PXPOp &sourceColorKey(uint32_t low, uint32_t high)
         { _ps_key_low = low; _ps_key_high = high; _ps_key = true; return *this; }
-    PXPOp &rop(PXPRop r)                   { _rop = r; _rop_set = true; return *this; }
+    PXPOp &rop(PXPRop r)
+        { _rop = r; _rop_set = true; _overlay_touched = true; return *this; }
 
     PXPError run(uint32_t timeout_ms = 100);
     PXPError runAsync(EventResponder *onComplete = nullptr);
@@ -212,6 +219,9 @@ private:
     uint8_t      _alpha_value = 0xFF;
     bool         _alpha_invert = false;
     bool         _as_key = false, _ps_key = false, _rop_set = false;
+    /* Set by every overlay* setter (and rop()); _program() rejects an op
+     * where these were called but overlay() was not - see the AS block. */
+    bool         _overlay_touched = false;
     uint32_t     _as_key_low = 0, _as_key_high = 0;
     uint32_t     _ps_key_low = 0, _ps_key_high = 0;
     PXPRop       _rop = PXP_ROP_MASKAS;

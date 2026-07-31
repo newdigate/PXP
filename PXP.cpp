@@ -271,7 +271,12 @@ PXPError PXPOp::_program()
         PXP_OUT_PS_LRC = PXP_COORD(cw - 1, ch - 1);
     }
 
-    /* === AS (Phase 3) - written EVERY op, armed or idle =================== */
+    /* === AS (Phase 3) - written EVERY op, armed or idle ===================
+     * Ordering constraint: this block validates AFTER the OUT/PS registers
+     * above are already written (unlike the rest of _program(), which checks
+     * everything before touching hardware).  Harmless because ENABLE is only
+     * set after a PXP_OK return - but a refactor must not assume the
+     * no-writes-before-last-check pattern holds here. */
     if (_as) {
         uint8_t as_fmt = pxpAsFormat(_as->format);
         if (as_fmt == PXP_FMT_NA)           return PXP_ERR_FORMAT;
@@ -299,18 +304,24 @@ PXPError PXPOp::_program()
         PXP_OUT_AS_ULC = PXP_COORD(_as_x, _as_y);
         PXP_OUT_AS_LRC = PXP_COORD(_as_x + _as->width - 1,
                                    _as_y + _as->height - 1);
-        PXP_AS_CLRKEYLOW  = _as_key ? _as_key_low  : 0x00FFFFFFu;
-        PXP_AS_CLRKEYHIGH = _as_key ? _as_key_high : 0x00000000u;
+        /* CLRKEY PIXEL fields are 24-bit; [31:24] reserved (as fill() masks
+         * PS_BACKGROUND). */
+        PXP_AS_CLRKEYLOW  = _as_key ? (_as_key_low  & 0x00FFFFFFu) : 0x00FFFFFFu;
+        PXP_AS_CLRKEYHIGH = _as_key ? (_as_key_high & 0x00FFFFFFu) : 0x00000000u;
     } else {
-        if (_rop_set)                       return PXP_ERR_CONFIG;
+        /* An overlay setter without overlay() is a forgotten .overlay(sprite)
+         * - error, never a silent plain blit. */
+        if (_overlay_touched)               return PXP_ERR_CONFIG;
         PXP_AS_CTRL       = 0;
-        PXP_OUT_AS_ULC    = 0xFFFFFFFFu;    /* degenerate: ULC > LRC = disarmed */
-        PXP_OUT_AS_LRC    = 0x00000000u;
+        /* Degenerate ULC > LRC on both axes = disarmed; reserved bits
+         * [31:30]/[15:14] stay zero (RM 52.6.10/11), hence PXP_COORD. */
+        PXP_OUT_AS_ULC    = PXP_COORD(0x3FFF, 0x3FFF);
+        PXP_OUT_AS_LRC    = PXP_COORD(0, 0);
         PXP_AS_CLRKEYLOW  = 0x00FFFFFFu;    /* never-true key range (RM 52.3.1.13) */
         PXP_AS_CLRKEYHIGH = 0x00000000u;
     }
-    PXP_PS_CLRKEYLOW  = _ps_key ? _ps_key_low  : 0x00FFFFFFu;
-    PXP_PS_CLRKEYHIGH = _ps_key ? _ps_key_high : 0x00000000u;
+    PXP_PS_CLRKEYLOW  = _ps_key ? (_ps_key_low  & 0x00FFFFFFu) : 0x00FFFFFFu;
+    PXP_PS_CLRKEYHIGH = _ps_key ? (_ps_key_high & 0x00FFFFFFu) : 0x00000000u;
 
     /* CSC1: for a YUV source, run the PS datapath through the YUV->RGB matrix;
      * for an RGB source (or fill), bypass it.  The block resets NOT-bypassed
