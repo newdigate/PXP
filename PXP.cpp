@@ -284,8 +284,15 @@ PXPError PXPOp::_program()
             _as->width == 0 || _as->height == 0)
             return PXP_ERR_CONFIG;
         if (!_as->reachable())              return PXP_ERR_UNREACHABLE;
-        if (_rot != PXP_ROT_0 || decimating)
-            return PXP_ERR_CONFIG;          /* v8 measures ROT_0 compositing only */
+        if (_rot != PXP_ROT_0 || decimating || _hflip || _vflip)
+            return PXP_ERR_CONFIG;          /* v8 measured ROT_0, unflipped
+                                             * compositing only: the RM says an
+                                             * output-stage flip mirrors the
+                                             * COMPOSITED result (AS included)
+                                             * and the QEMU model would flip PS
+                                             * alone -- an unmeasured, silently
+                                             * diverging combo (v8 final
+                                             * review, finding 1) */
         if (_rop_set != (_alpha_mode == PXP_ALPHA_ROPS))
             return PXP_ERR_CONFIG;          /* rop() iff Rops mode */
         /* AS rect must sit inside the output extent (shared coordinate space
@@ -312,6 +319,12 @@ PXPError PXPOp::_program()
         /* An overlay setter without overlay() is a forgotten .overlay(sprite)
          * - error, never a silent plain blit. */
         if (_overlay_touched)               return PXP_ERR_CONFIG;
+        /* A PS colorkey with NO alpha surface is RM-undefined (52.3.1.13's
+         * key result is "AS is passed" -- there is no AS), was never measured
+         * on silicon, and the QEMU model evaluates PS keys only inside an
+         * armed AS rect: an accepted key-only op would silently diverge.
+         * Reject until a milestone measures it (v8 final review, finding 2). */
+        if (_ps_key)                        return PXP_ERR_CONFIG;
         PXP_AS_CTRL       = 0;
         /* Degenerate ULC > LRC on both axes = disarmed; reserved bits
          * [31:30]/[15:14] stay zero (RM 52.6.10/11), hence PXP_COORD. */

@@ -9,7 +9,8 @@ derived from. MIT licensed; see `LICENSE`.
 
 ## Status
 
-**Phases 1–3 implemented; Phases 1–2 HW-verified on the MIMXRT1170-EVKB.**
+**Phases 1–3 implemented and HW-verified on the MIMXRT1170-EVKB** (Phase 3:
+31 oracle cases, stable x2 on silicon + the four-frame eye ritual).
 Phase 1: `fill`, `blit`, placement, all four rotations, both flips, and
 blocking + async completion all pass with identical checksums in the QEMU
 gate and on real silicon (`PXP_ALL=PASS`). Hardware verification found and
@@ -20,7 +21,8 @@ and `rt1176-evkb/docs/superpowers/specs/2026-07-22-rt1176-pxp-design.md`
 (Amendment 2) for the full writeup. Phase 2 added PS pre-decimation
 (`pxp_decimate_test`) and YUV sources through CSC1 (`pxp_yuv_test`).
 Phase 3 (below) adds alpha-surface compositing; its contested blend/key
-semantics are being pinned by silicon measurement in
+semantics were SILICON-MEASURED (the RM contradicts itself twice); the
+authoritative record is the RESOLVED AMBIGUITIES section of
 `rt1176-evkb/examples/display/pxp_composite_test`.
 
 Consumed as a manifest library via `import_evkb_library(PXP)` in
@@ -62,7 +64,8 @@ AS) onto the source (PS), programmed with six fluent calls. `.overlay()`
 arms the AS; calling any other overlay setter (or `.rop()`) without it is
 treated as a forgotten `.overlay(sprite)` and fails with `PXP_ERR_CONFIG`
 rather than silently degrading to a plain blit
-(`.sourceColorKey()` is PS-side and independent):
+(`.sourceColorKey()` programs the PS-side key and requires an armed
+overlay -- a PS key with no AS is RM-undefined/unmeasured and is rejected):
 
 ```cpp
 PXP.op().source(bg).output(screen)

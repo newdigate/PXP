@@ -178,7 +178,9 @@ public:
      * silent plain blit.  When the AS is unarmed, _program() still writes the
      * full AS register set to its IDLE state (degenerate rect + colorkeys at
      * the never-true encoding) so a previous op can never leave the AS
-     * half-armed.  sourceColorKey() is PS-side and independent of overlay().
+     * half-armed.  sourceColorKey() programs the PS-side key but REQUIRES an
+     * armed overlay: a PS key with no AS is RM-undefined and unmeasured, so
+     * _program() rejects it (PXP_ERR_CONFIG).
      * Semantics measured on silicon (v8 transcript) -- see README Phase 3. */
     PXPOp &overlay(const PXPSurface &as)   { _as = &as; return *this; }
     PXPOp &overlay(const PXPSurface &&) = delete;   /* dangling-temporary guard */
