@@ -230,6 +230,11 @@ PXPError PXPOp::_program()
     if (!_fillOnly && (_src->bytesPerPixel() == 0 || _src->pitch == 0))
         return PXP_ERR_CONFIG;
 
+    /* alphaOut() overrides BYTE 3, which exists only in a 32-bit output.  (A
+     * 16-bit ARGB1555/4444 carries alpha inside the pixel -- no token for
+     * those yet.) */
+    if (_alpha_out_set && dbpp != 4u)        return PXP_ERR_CONFIG;
+
     uint32_t out_buf = (uint32_t)_dst->data + (uint32_t)_y * _dst->pitch
                                            + (uint32_t)_x * dbpp;
 
@@ -250,7 +255,12 @@ PXPError PXPOp::_program()
      * equal the source dims when not decimating.  For rotation the model reads
      * OUT_LRC as the pre-rotation source frame (decimation excluded), so cw,ch
      * are still right there. */
-    PXP_OUT_CTRL   = (uint32_t)out_fmt & PXP_OUT_FORMAT_MASK;
+    /* OUT_CTRL: [4:0] format; [23] ALPHA_OUTPUT + [31:24] ALPHA only when the
+     * op asked for the override (RM 52.6.3).  Every other op keeps writing
+     * the computed alpha -- 0 with the engine unconfigured -- which is what
+     * every existing golden measured. */
+    PXP_OUT_CTRL   = ((uint32_t)out_fmt & PXP_OUT_FORMAT_MASK)
+                   | (_alpha_out_set ? ((1u << 23) | ((uint32_t)_alpha_out << 24)) : 0u);
     PXP_OUT_BUF    = out_buf;
     PXP_OUT_PITCH  = _dst->pitch;
     PXP_OUT_LRC    = PXP_COORD(cw - 1, ch - 1);

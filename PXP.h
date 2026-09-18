@@ -197,6 +197,21 @@ public:
     PXPOp &rop(PXPRop r)
         { _rop = r; _rop_set = true; _overlay_touched = true; return *this; }
 
+    /* OUT_CTRL[ALPHA_OUTPUT] (RM 52.6.3): write `alpha` into byte 3 of every
+     * 32-bit output pixel instead of the pipeline's computed alpha.  The
+     * computed alpha is 0 whenever the alpha engine is unconfigured (a plain
+     * copy, a fill, a rotate -- MEASURED on the EVKB, lvgl_pxp_copy_bench
+     * v7), so without this a 32-bit PXP copy is never byte-preserving.  With
+     * alphaOut(0xFF) a copy of a buffer whose X byte is 0xFF everywhere --
+     * every LVGL-rendered XRGB8888 buffer -- is byte-identical to a CPU copy
+     * (modelled in QEMU from the RM; the silicon reading is NEW-55's
+     * lvgl_pxp_copy_bench pxp_aff arm).  Rejected (PXP_ERR_CONFIG) with a
+     * 16-bit output format, which has no byte 3 to override: an explicit
+     * error, never a silent no-op.  Unrelated to overlayAlpha(), which is
+     * the AS engine's blend alpha (AS_CTRL). */
+    PXPOp &alphaOut(uint8_t alpha)
+        { _alpha_out = alpha; _alpha_out_set = true; return *this; }
+
     PXPError run(uint32_t timeout_ms = 100);
     PXPError runAsync(EventResponder *onComplete = nullptr);
 
@@ -213,6 +228,8 @@ private:
     PXPDecim     _decx = PXP_DEC_1, _decy = PXP_DEC_1;
     bool         _hflip = false, _vflip = false;
     bool         _fillOnly = false;   /* PS positioned outside the window */
+    bool         _alpha_out_set = false;   /* alphaOut() called */
+    uint8_t      _alpha_out = 0xFF;
 
     /* Phase 3 (AS) state - all inert until overlay() arms _as. */
     const PXPSurface *_as = nullptr;

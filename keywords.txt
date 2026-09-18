@@ -41,6 +41,7 @@ overlayAlpha	KEYWORD2
 overlayColorKey	KEYWORD2
 sourceColorKey	KEYWORD2
 rop	KEYWORD2
+alphaOut	KEYWORD2
 run	KEYWORD2
 runAsync	KEYWORD2
 reachable	KEYWORD2

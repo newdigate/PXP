@@ -56,6 +56,14 @@ Consumed as a manifest library via `import_evkb_library(PXP)` in
   its role — source (`PS_CTRL[FORMAT]`), destination (`OUT_CTRL[FORMAT]`),
   or overlay (`AS_CTRL[FORMAT]`); `pxpPsFormat()` / `pxpOutFormat()` /
   `pxpAsFormat()` translate per role.
+- **Output alpha** — `alphaOut(alpha)` writes `alpha` into byte 3 of every
+  32-bit output pixel (`OUT_CTRL[ALPHA_OUTPUT]`). Without it the PXP writes
+  its COMPUTED alpha, which is 0 for any op with the alpha engine
+  unconfigured (copy, fill, rotate) — measured on silicon, so a plain 32-bit
+  copy is never byte-preserving. `alphaOut(0xFF)` is meant to make a copy of
+  an LVGL XRGB8888 buffer byte-identical to a CPU copy (modelled in QEMU from
+  the RM; the silicon reading is NEW-55's `lvgl_pxp_copy_bench` `pxp_aff`
+  arm). `PXP_ERR_CONFIG` with a 16-bit output.
 
 ## Phase 3: compositing
 
